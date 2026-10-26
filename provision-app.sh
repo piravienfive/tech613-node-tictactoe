@@ -2,101 +2,106 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# ==========================================
-# Sparta Tic Tac Toe - AWS EC2 Deployment
-# ==========================================
-
+# Sparta Tic Tac Toe deployment configuration
 APP_NAME="sparta-app-v2"
-ZIP_FILE="/home/ubuntu/nodejs20-sparta-tictactoe-v1.zip"
+REPO_URL="https://github.com/piravienfive/tech613-node-tictactoe.git"
 DEPLOY_DIR="/home/ubuntu/sparta-deployment"
+APP_PORT=3000
 
-echo "Starting deployment: $APP_NAME"
+echo "Starting deployment of $APP_NAME"
 
-# 1. Check ZIP file exists
-if [[ ! -f "$ZIP_FILE" ]]; then
-    echo "ERROR: ZIP file not found at $ZIP_FILE"
-    exit 1
-fi
-
-# 2. Install system dependencies
+# 1. Install system dependencies
 sudo apt-get update -y
 sudo apt-get install -y \
-    curl ca-certificates unzip rsync
+  git curl ca-certificates nginx
 
-# 3. Install Node.js 20 if missing
+# 2. Install Node.js 20 if missing
 if ! command -v node >/dev/null 2>&1; then
-    curl -fsSL \
-      https://deb.nodesource.com/setup_20.x \
-      | sudo -E bash -
-    sudo apt-get install -y nodejs
+  curl -fsSL https://deb.nodesource.com/setup_20.x \
+    | sudo -E bash -
+  sudo apt-get install -y nodejs
 fi
 
-# Verify Node.js version
-NODE_MAJOR=$(node -p \
-    "process.versions.node.split('.')[0]")
+NODE_MAJOR=$(node -p "process.versions.node.split('.')[0]")
 
 if [[ "$NODE_MAJOR" != "20" ]]; then
-    echo "ERROR: Node.js 20 is required"
-    exit 1
+  echo "ERROR: Node.js 20 required"
+  exit 1
 fi
 
-# 4. Install PM2 if missing
+# 3. Install PM2 if missing
 if ! command -v pm2 >/dev/null 2>&1; then
-    sudo npm install -g pm2
+  sudo npm install -g pm2
 fi
 
-# 5. Create deployment directory
-mkdir -p "$DEPLOY_DIR/releases"
+# 4. Clone or update application source
+mkdir -p "$DEPLOY_DIR"
 
-# 6. Create new release directory
-RELEASE_DIR=$(mktemp -d \
-    "$DEPLOY_DIR/releases/release-XXXXXX")
-
-# 7. Extract application ZIP
-unzip -q "$ZIP_FILE" -d "$RELEASE_DIR"
-
-APP_SOURCE="$RELEASE_DIR/app"
-
-if [[ ! -f "$APP_SOURCE/package.json" ]]; then
-    echo "ERROR: package.json not found"
-    exit 1
+if [[ ! -d "$DEPLOY_DIR/repository/.git" ]]; then
+  git clone "$REPO_URL" "$DEPLOY_DIR/repository"
+else
+  git -C "$DEPLOY_DIR/repository" fetch origin
+  BRANCH=$(git -C "$DEPLOY_DIR/repository" \
+    symbolic-ref --quiet --short refs/remotes/origin/HEAD)
+  BRANCH=${BRANCH#origin/}
+  git -C "$DEPLOY_DIR/repository" reset --hard "origin/$BRANCH"
 fi
 
-# 8. Install application dependencies
-cd "$APP_SOURCE"
+# 5. Locate Node.js application
+if [[ -f "$DEPLOY_DIR/repository/app/package.json" ]]; then
+  APP_DIR="$DEPLOY_DIR/repository/app"
+elif [[ -f "$DEPLOY_DIR/repository/package.json" ]]; then
+  APP_DIR="$DEPLOY_DIR/repository"
+else
+  echo "ERROR: package.json not found"
+  exit 1
+fi
 
-# Prevent postinstall from resetting scoreboard
+# 6. Install dependencies without running seeds
+cd "$APP_DIR"
 npm ci --ignore-scripts
 
-# 9. Verify entry point
-if [[ ! -f "index.js" ]]; then
-    echo "ERROR: index.js not found"
-    exit 1
-fi
-
-# 10. Update current application symlink
-ln -sfn "$APP_SOURCE" "$DEPLOY_DIR/current.new"
-mv -Tf "$DEPLOY_DIR/current.new" \
-    "$DEPLOY_DIR/current"
-
-# 11. Start or restart application with PM2
+# 7. Start or restart app using PM2
 if pm2 describe "$APP_NAME" >/dev/null 2>&1; then
-    echo "Stopping existing PM2 process..."
-    pm2 delete "$APP_NAME"
+  pm2 delete "$APP_NAME"
 fi
 
-echo "Starting application with PM2..."
+pm2 start "$APP_DIR/index.js" \
+  --name "$APP_NAME" \
+  --cwd "$APP_DIR"
 
-pm2 start "$DEPLOY_DIR/current/index.js" \
-    --name "$APP_NAME" \
-    --cwd "$DEPLOY_DIR/current"
-
-# 12. Save PM2 configuration
 pm2 save
 
-echo "=================================="
+# 8. Configure Nginx reverse proxy
+sudo tee /etc/nginx/sites-available/sparta-app \
+  >/dev/null <<EOF
+server {
+    listen 80;
+    server_name _;
+
+    location / {
+        proxy_pass http://127.0.0.1:${APP_PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+
+# 9. Enable Nginx configuration
+sudo ln -sfn \
+  /etc/nginx/sites-available/sparta-app \
+  /etc/nginx/sites-enabled/sparta-app
+
+# Disable default site to avoid conflicts
+sudo rm -f /etc/nginx/sites-enabled/default
+
+# 10. Validate and reload Nginx
+sudo nginx -t
+sudo systemctl enable nginx
+sudo systemctl reload nginx
+
 echo "Deployment completed successfully!"
-echo "=================================="
-
 pm2 status
-
