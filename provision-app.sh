@@ -47,13 +47,24 @@ else
   git -C "$DEPLOY_DIR/repository" reset --hard "origin/$BRANCH"
 fi
 
-# 5. Locate Node.js application
-if [[ -f "$DEPLOY_DIR/repository/app/package.json" ]]; then
-  APP_DIR="$DEPLOY_DIR/repository/app"
-elif [[ -f "$DEPLOY_DIR/repository/package.json" ]]; then
-  APP_DIR="$DEPLOY_DIR/repository"
-else
-  echo "ERROR: package.json not found"
+# 5. Extract application source from GitHub ZIP
+ZIP_FILE="$DEPLOY_DIR/repository/nodejs20-sparta-tictactoe-v1.zip"
+EXTRACT_DIR="$DEPLOY_DIR/extracted"
+
+if [[ ! -f "$ZIP_FILE" ]]; then
+  echo "ERROR: Application ZIP not found in GitHub repository"
+  exit 1
+fi
+
+sudo apt-get install -y unzip
+
+mkdir -p "$EXTRACT_DIR"
+unzip -oq "$ZIP_FILE" -d "$EXTRACT_DIR"
+
+APP_DIR="$EXTRACT_DIR/app"
+
+if [[ ! -f "$APP_DIR/package.json" ]]; then
+  echo "ERROR: package.json not found after extraction"
   exit 1
 fi
 
